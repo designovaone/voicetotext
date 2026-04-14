@@ -1,8 +1,10 @@
 # VoiceText
 
-Personal voice-to-text web app. Record on any browser (iPhone Safari, Mac), get cleaned-up, grammar-corrected transcription back.
+As a non-native English speaker with a German accent, I've always struggled with voice-to-text recognition. Recently I tried a Mac/iPhone tool that used Gemini for transcription and Haiku for text cleanup through a BYOK key — it worked remarkably well. Over the 90 days I could use it on my iPhone, I paid pennies for near-perfect voice-to-text conversion.
 
-Replaces Ottex AI after its iPhone TestFlight expired. Same workflow: Gemini for transcription (handles German-accented English well), Haiku for text cleanup, a single OpenRouter key for both.
+What I especially liked was routing both models through a single API key via OpenRouter. When that tool's TestFlight window expired and I couldn't find a replacement that combined these models behind one provider, I decided to build my own.
+
+Happy talking.
 
 ## How it works
 
