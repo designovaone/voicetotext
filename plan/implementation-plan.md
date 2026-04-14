@@ -150,7 +150,6 @@ voicetext/
 │   ├── db.ts                   # Neon PostgreSQL connection
 │   ├── auth.ts                 # Cookie-based auth (same as Charge Recorder)
 │   ├── openrouter.ts           # OpenRouter API client (Gemini + Haiku)
-│   ├── audio.ts                # Audio format conversion (→ WAV)
 │   └── types.ts                # TypeScript interfaces
 ├── public/
 │   └── icon-192.png            # PWA icon
@@ -174,33 +173,34 @@ voicetext/
 
 ### Gemini Supported Audio Formats
 
-Gemini accepts: **WAV, MP3, AAC, OGG, FLAC, AIFF**. Does NOT accept `audio/mp4` or
-`audio/webm` containers directly.
+Gemini accepts: **WAV, MP3, AAC, OGG, FLAC, AIFF**, plus — verified via spike on 2026-04-14 —
+**MP4/M4A containers directly** through OpenRouter's `input_audio` content type (formats
+`mp4`, `m4a`, `aac` all transcribe correctly).
 
-**Solution:** Convert to WAV (mono, 16kHz) server-side before sending to Gemini via
-OpenRouter. This is the proven pattern used by existing OpenRouter transcription tools.
+**Solution:** No server-side conversion for Safari. Forward the raw `audio/mp4` blob from
+MediaRecorder straight to OpenRouter with `format: 'mp4'`. This eliminates `ffmpeg-wasm`
+and all associated Vercel cold-start/memory/timeout risk.
+
+**Chrome (`audio/webm;codecs=opus`):** Not verified in spike (no local opus encoder).
+Verify in-browser during Phase 2. Fallback options if webm fails:
+- Require Safari on Mac (acceptable for single-user app)
+- Client-side decode via Web Audio API → re-encode as WAV before upload
 
 ### Recording Limit: 10 Minutes
 
-| Duration | Safari AAC (upload) | WAV 16kHz (to Gemini) | Gemini tokens | Est. latency |
-|---|---|---|---|---|
-| 1 min | ~1 MB | ~1.9 MB | 1,920 | ~2-3 sec |
-| 2 min | ~2 MB | ~3.8 MB | 3,840 | ~3-5 sec |
-| 5 min | ~5 MB | ~9.6 MB | 9,600 | ~5-10 sec |
-| **10 min** | **~10 MB** | **~19.2 MB** | **19,200** | **~10-20 sec** |
+| Duration | Safari MP4/AAC (sent as-is) | Gemini audio tokens | Est. latency |
+|---|---|---|---|
+| 1 min | ~1 MB | ~1,920 | ~2-3 sec |
+| 2 min | ~2 MB | ~3,840 | ~3-5 sec |
+| 5 min | ~5 MB | ~9,600 | ~5-10 sec |
+| **10 min** | **~10 MB** | **~19,200** | **~10-20 sec** |
 
-- Gemini inline audio limit: **20 MB** per request. 10 min WAV at 19.2 MB fits within limit.
-- Browser uploads the compressed AAC/Opus (~10 MB for 10 min), server converts to WAV for Gemini.
+- Gemini inline audio limit: **20 MB** per request. Compressed AAC stays well under limit.
+- No conversion: browser blob is forwarded directly to OpenRouter.
 - Client-side timer enforces 10-minute cap with UI countdown.
+- **Vercel plan:** estimated latency (10-20s) exceeds Hobby's 10s function timeout.
+  Requires Pro plan (60s default) or a lower recording cap.
 - For longer text, use the "Continue" feature across multiple recordings.
-
-### Server-Side Audio Conversion
-
-The `/api/transcribe` route must convert browser audio to WAV before sending to OpenRouter.
-Options for Vercel serverless environment:
-- `ffmpeg-wasm` (WebAssembly, runs in serverless)
-- Extract AAC stream and re-wrap (lighter alternative)
-- Or send AAC directly if OpenRouter/Gemini accepts `audio/aac` (test first — may skip conversion)
 
 ---
 
@@ -241,17 +241,19 @@ const transcribeResponse = await fetch('https://openrouter.ai/api/v1/chat/comple
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: 'Transcribe this audio. The speaker has a German accent speaking English.' },
-        { type: 'input_audio', input_audio: { data: base64WavAudio, format: 'wav' } }
+        { type: 'text', text: 'Transcribe this audio verbatim. The speaker has a German accent speaking English.' },
+        { type: 'input_audio', input_audio: { data: base64Audio, format: 'mp4' } }  // Safari: 'mp4'; Chrome webm TBD
       ]
     }]
   })
 });
 ```
 
-- Audio converted to WAV (mono, 16kHz) server-side before sending
+- Raw browser blob base64-encoded and forwarded (no transcoding)
+- `format` value matches browser mimeType: `mp4` for Safari, TBD for Chrome webm
 - Prompt includes accent hint for better accuracy
 - Model: `google/gemini-2.5-flash` via OpenRouter
+- Cost (verified): ~$0.0001 per short clip; 10-min clip ≈ $0.002
 
 ### Transform via OpenRouter → Haiku (Server)
 
@@ -263,7 +265,7 @@ const transformResponse = await fetch('https://openrouter.ai/api/v1/chat/complet
     'Content-Type': 'application/json'
   },
   body: JSON.stringify({
-    model: 'anthropic/claude-haiku-4-5-20251001',
+    model: 'anthropic/claude-haiku-4.5',
     messages: [{
       role: 'user',
       content: `Clean up this transcription. Fix grammar, remove filler words, 
@@ -387,21 +389,26 @@ Note: OpenRouter uses standard fetch (OpenAI-compatible REST API), no SDK needed
 
 ## Resolved Questions
 
-1. **Single OpenRouter key — YES.** OpenRouter supports Gemini audio input via `input_audio`
-   content type. Proven pattern used by multiple tools (openrouter-transcribe skill, etc.).
-   Single `OPENROUTER_API_KEY` env var for both Gemini transcription and Haiku transform.
+1. **Single OpenRouter key — YES.** Verified 2026-04-14 spike: `google/gemini-2.5-flash`
+   accepts audio via `input_audio` content type. Single `OPENROUTER_API_KEY` handles both
+   transcription and Haiku transform.
 
-2. **Audio format — Convert to WAV server-side.** Safari produces `audio/mp4` (AAC), Chrome
-   produces `audio/webm` (Opus). Gemini accepts WAV, MP3, AAC, OGG, FLAC but not mp4/webm
-   containers. Server converts to WAV (mono, 16kHz) before sending to OpenRouter.
-   Optimization: test if sending raw AAC stream works to skip conversion.
+2. **Audio format — No server-side conversion needed (Safari).** Spike verified that
+   `mp4`, `m4a`, and `aac` formats all transcribe correctly via OpenRouter. Browser blob
+   is forwarded directly.
 
-3. **Recording limit — 10 minutes.** 10 min WAV = ~19.2 MB, fits under Gemini's 20 MB inline
-   limit. Browser uploads compressed AAC (~10 MB for 10 min). Client-side timer with countdown.
-   "Continue" feature covers any need beyond 10 min.
+3. **Recording limit — 10 minutes.** Safari AAC at ~10 MB for 10 min, well under Gemini's
+   20 MB inline limit. Client-side timer enforces cap. "Continue" feature covers overflow.
+
+4. **Haiku slug — `anthropic/claude-haiku-4.5`.** Verified against OpenRouter models
+   endpoint; dated suffix (`-20251001`) is Anthropic-direct only, not valid on OpenRouter.
+
+5. **Vercel plan — Pro required.** 10-min recordings can exceed Hobby's 10s function
+   timeout. Pro gives 60s default / 300s max.
 
 ## Open Questions
 
-4. **Domain:** Confirm naming — `voicetext.coffeit.com` or similar.
-5. **Audio conversion library:** Verify best option for Vercel serverless (ffmpeg-wasm vs
-   lighter AAC extraction). Test during Phase 2.
+6. **Domain:** Confirm naming — `voicetext.coffeit.com` or similar.
+7. **Chrome webm support:** Verify `google/gemini-2.5-flash` accepts `audio/webm;codecs=opus`
+   with `format: 'webm'` in-browser during Phase 2. If not, fallback = Safari-only on Mac,
+   or client-side Web Audio API decode to WAV before upload.
