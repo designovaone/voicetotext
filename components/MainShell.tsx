@@ -152,6 +152,7 @@ export default function MainShell() {
         )}
         <RecordButton
           onRecorded={handleRecorded}
+          onCancel={() => showToast('Recording discarded')}
           isProcessing={isProcessing}
         />
       </footer>
